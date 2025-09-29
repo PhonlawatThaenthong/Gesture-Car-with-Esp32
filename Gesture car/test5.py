@@ -3,7 +3,7 @@ import pygame, serial, serial.tools.list_ports, sys, time
 def find_serial_port():
     ports = serial.tools.list_ports.comports()
     if not ports: sys.exit("No COM ports found")
-    return serial.Serial("COM3", 9600, timeout=1)  # COM3 for pc / /dev/ttyUSB0 for odroid
+    return serial.Serial("COM3", 9600, timeout=1)  # change to /dev/ttyUSB0 on Odroid
 
 ser = find_serial_port()
 pygame.init()
@@ -16,15 +16,19 @@ cols, rows = W//G, H//G
 # 🚗 Car starts in the middle
 x, y = cols//2, rows//2
 trail, last_cmd, block = [], "S", False
-esp_status = ""   # 🔹 store latest ESP32-B status
+esp_status = ""              # 🔹 ESP32-B connection status
+arm_status = "Not pressed"   # 🔹 Button state
 clock = pygame.time.Clock()
 last_move_time = time.time()
 
-# 🔹 control how often we send to Mega
-last_send_time = 0
-SEND_INTERVAL = 0.4   # 200 ms between sends
+# 🔹 Mega send control
+last_sent_cmd = None
+last_sent_arm = None
+last_send_time_cmd = 0
+last_send_time_arm = 0
+SEND_INTERVAL = 0.4   # 400 ms between sends
 
-# 🔹 block timeout (reset if no "block" seen recently)
+# 🔹 block timeout
 block_until = 0
 
 def draw_grid():
@@ -48,9 +52,12 @@ def draw():
     # CMD status
     screen.blit(font.render(f"CMD:{last_cmd}",1,(0,255,0)),(10,10))
 
-    # ESP32-B connection status (top-left under CMD)
+    # ESP32-B status
     if esp_status:
         screen.blit(font.render(f"ESP32-B: {esp_status}",1,(0,200,255)),(10,35))
+
+    # Arm status
+    screen.blit(font.render(f"Arm : {arm_status}",1,(255,255,0)),(10,60))
 
     # BLOCK text
     if block:
@@ -88,36 +95,60 @@ def detect(ax,ay):
 
 while True:
     for e in pygame.event.get():
-        if e.type==pygame.QUIT: pygame.quit(); ser.close(); sys.exit()
+        if e.type==pygame.QUIT: 
+            ser.write(b"S\n")  # send stop before quit
+            pygame.quit(); ser.close(); sys.exit()
 
     while ser.in_waiting:
         line = ser.readline().decode(errors="ignore").strip()
-        if "," in line:  # Gyro data
-            ax,ay = map(float,line.split(","))
-            cmd = detect(ax,ay)
+        if not line:
+            continue
 
-            # 🔹 If blocked → only accept backward (b/B), else ignore
-            if block and cmd not in ["b","B"]:
-                continue  # skip sending & moving
-            else:
-                last_cmd = cmd
+        # --- Gyro + Button data ---
+        if "," in line:
+            parts = line.split(",")
+            if len(parts) == 3:
+                try:
+                    ax, ay, btn = float(parts[0]), float(parts[1]), int(parts[2])
+                except ValueError:
+                    continue  # skip invalid
 
-            move(last_cmd)
+                # Gyro control
+                cmd = detect(ax, ay)
+                if not (block and cmd not in ["b","B"]):  
+                    # allow only B/b when blocked
+                    last_cmd = cmd
+                    move(last_cmd)
 
-            # 🔹 only send if enough time passed
-            now = time.time()
-            if now - last_send_time >= SEND_INTERVAL:
-                ser.write((last_cmd+"\n").encode())
-                last_send_time = now
+                    # Send movement if changed
+                    now = time.time()
+                    if last_cmd != last_sent_cmd and (now - last_send_time_cmd) >= SEND_INTERVAL:
+                        ser.write((last_cmd+"\n").encode())
+                        last_sent_cmd = last_cmd
+                        last_send_time_cmd = now
 
-        elif "block" in line.lower():  # Block flag
+                # Button state → Arm (always processed, even if blocked)
+                new_arm_status = "pressed" if btn == 1 else "Not pressed"
+                if new_arm_status != arm_status:
+                    arm_status = new_arm_status
+                    now = time.time()
+                    if (arm_status != last_sent_arm) and (now - last_send_time_arm) >= SEND_INTERVAL:
+                        if arm_status == "pressed":
+                            ser.write(b"u\n")
+                        else:
+                            ser.write(b"i\n")
+                        last_sent_arm = arm_status
+                        last_send_time_arm = now
+
+        # --- Block flag ---
+        elif "block" in line.lower():
             block = True
-            block_until = time.time() + 1.0  # keep blocked for 1 second after last "block"
+            block_until = time.time() + 1.0  
 
+        # --- ESP32-B connection status ---
         elif any(word in line for word in ["Connecting","Connected","Reconnected","Failed"]):
-            esp_status = line  # 🔹 save ESP32-B status
+            esp_status = line  
 
-    # 🔹 reset block if timeout passed
     if block and time.time() > block_until:
         block = False
 
