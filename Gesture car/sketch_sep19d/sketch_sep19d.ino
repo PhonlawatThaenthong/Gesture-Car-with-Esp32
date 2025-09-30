@@ -15,17 +15,21 @@ const int ESP32B_PORT = 4210;
 WiFiUDP udp;
 Adafruit_MPU6050 mpu;
 
+// === 🔹 Button Pin ===
+const int buttonPin = 4;  // choose any free GPIO pin, e.g. GPIO4
+bool lastButtonState = HIGH;  // store last state
+
 // Kalman filter variables
 float x_angle = 0, y_angle = 0;
 float x_bias = 0, y_bias = 0;
 float P[2][2] = { { 1, 0 }, { 0, 1 } };
 
 // 🔹 Kalman filter tuning parameters
-float q_angle = 0.01;    
-float q_bias = 0.01;     
-float r_measure = 0.01;  
+float q_angle = 0.01;
+float q_bias = 0.01;
+float r_measure = 0.01;
 
-// Kalman filter function
+// === 🔹 Kalman filter function ===
 float kalmanFilter(float newAngle, float newRate, float dt, float &angle, float &bias) {
   float rate = newRate - bias;
   angle += dt * rate;
@@ -79,6 +83,9 @@ void setup() {
   Serial.println("\nWiFi connected");
   Serial.print("ESP32-A IP: ");
   Serial.println(WiFi.localIP());
+
+  // Button setup
+  pinMode(buttonPin, INPUT_PULLUP); // button between pin and GND
 }
 
 void loop() {
@@ -93,37 +100,22 @@ void loop() {
   float filteredX = kalmanFilter(a.acceleration.x, g.gyro.x, dt, x_angle, x_bias);
   float filteredY = kalmanFilter(a.acceleration.y, g.gyro.y, dt, y_angle, y_bias);
 
-  char cmd = 'S'; // default Stop
-
-  // Gesture detection with 2-stage speeds
-  // if (filteredY > 5 && filteredY <= 8)       cmd = 'r';   // Forward slow
-  // else if (filteredY > 8)                    cmd = 'R';   // Forward fast
-
-  // else if (filteredY < -5 && filteredY >= -8) cmd = 'l';  // Backward slow
-  // else if (filteredY < -8)                    cmd = 'L';  // Backward fast
-
-  // else if (filteredX > 5 && filteredX <= 8)   cmd = 'b';  // Right slow
-  // else if (filteredX > 8)                     cmd = 'B';  // Right fast
-
-  // else if (filteredX < -5 && filteredX >= -8) cmd = 'f';  // Left slow
-  // else if (filteredX < -8)                    cmd = 'F';  // Left fast
-
-  // else cmd = 'S';  // Stop
+  // === 🔹 Button reading ===
+  int buttonState = digitalRead(buttonPin);
+  int buttonMsg = (buttonState == LOW) ? 1 : 0;
 
   // Debug output
-  // Serial.print("FilteredX: "); Serial.print(filteredX, 2);
-  // Serial.print(" FilteredY: "); Serial.print(filteredY, 2);
-  // Serial.print(" -> CMD: "); Serial.println(cmd);
-  Serial.print(filteredX, 2);
-  Serial.print(",");
-  Serial.print(filteredY, 2);
-  Serial.print(",");
-  char buffer[50];
-  snprintf(buffer, sizeof(buffer), "%.2f,%.2f", filteredX, filteredY);
-  // Send command to ESP32-B
+  Serial.print("X: "); Serial.print(filteredX, 2);
+  Serial.print(" Y: "); Serial.print(filteredY, 2);
+  Serial.print(" Button: "); Serial.println(buttonMsg);
+
+  // Combine MPU data and button state
+  char buffer[100];
+  snprintf(buffer, sizeof(buffer), "%.2f,%.2f,%d", filteredX, filteredY, buttonMsg);
+
+  // Send packet to ESP32-B
   udp.beginPacket(ESP32B_IP, ESP32B_PORT);
-  //udp.write(cmd);
-  udp.print(buffer); 
+  udp.print(buffer);
   udp.endPacket();
 
   delay(100); // adjust responsiveness
